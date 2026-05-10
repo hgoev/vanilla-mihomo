@@ -1,6 +1,7 @@
 # vanilla-mihomo
 windows mihomo裸核运行配置与一键执行脚本
-**适用与系统代理模式，tun模型可忽略该脚本**
+
+**适用于系统代理模式，tun模型可忽略该脚本**
 ## 使用说明
 - 下载[mihomo裸核](https://github.com/MetaCubeX/mihomo/releases)
 - 解压到任一文件夹，并将命名mihomo.exe
