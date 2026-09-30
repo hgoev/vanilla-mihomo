@@ -248,17 +248,21 @@ func setTunEnabled(enable bool) error {
 // 系统代理与 TUN 互斥，默认系统代理。
 // 重启：先确保旧进程退出并释放端口，再启动新进程，避免端口占用导致启动失败。
 func restartMihomo() error {
-	if isRunning() {
+	// 先确保旧进程退出、端口释放，再启动新实例，避免端口占用导致启动失败
+	_ = stopMihomo()
+	waitForDown(5)
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := startMihomo(); err != nil {
+			return err
+		}
+		if waitForUp(8) {
+			return nil
+		}
+		// 首次启动可能撞上端口未释放，稍等重试一次
 		_ = stopMihomo()
-		waitForDown(8)
+		waitForDown(3)
 	}
-	if err := startMihomo(); err != nil {
-		return err
-	}
-	if !waitForUp(8) {
-		return fmt.Errorf("mihomo 未在预期时间内启动（可能端口被占用）")
-	}
-	return nil
+	return fmt.Errorf("mihomo 未能在预期时间内启动")
 }
 
 func switchToSystemProxy() {
@@ -371,6 +375,7 @@ func onReady() {
 	go func() {
 		for range mStop.ClickedCh {
 			_ = stopMihomo()
+			waitForDown(5) // 等待 mihomo 真正退出，避免菜单误显示"运行中"
 			_ = setSystemProxy(false)
 			notify("mihomo 已停止")
 			refresh()
