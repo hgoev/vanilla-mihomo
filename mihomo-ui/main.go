@@ -1,4 +1,5 @@
 // mihomo-ui 是一个 Windows 系统托盘小工具，用于控制 mihomo。
+// 程序以管理员身份运行（内嵌 requireAdministrator 清单），
 // 编译为单个 mihomo-ui.exe，放到含 mihomo.exe 和 config.yaml 的目录即可运行。
 package main
 
@@ -12,7 +13,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/getlantern/systray"
 	"golang.org/x/sys/windows"
@@ -31,10 +31,8 @@ const (
 )
 
 var (
-	wininet             = windows.NewLazySystemDLL("wininet.dll")
-	procInternetSetOpt  = wininet.NewProc("InternetSetOptionW")
-	shell32             = windows.NewLazySystemDLL("shell32.dll")
-	procShellExecute    = shell32.NewProc("ShellExecuteW")
+	wininet          = windows.NewLazySystemDLL("wininet.dll")
+	procInternetSetOpt = wininet.NewProc("InternetSetOptionW")
 )
 
 type TUNConf struct {
@@ -123,7 +121,7 @@ func waitForUp(seconds int) bool {
 	return false
 }
 
-// ---------- 进程启动 / 停止 ----------
+// ---------- 进程启动 / 停止（程序已提权，子进程继承管理员令牌） ----------
 func runHidden(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
@@ -142,39 +140,8 @@ func startMihomo() error {
 	return cmd.Start()
 }
 
-func startMihomoElevated() error {
-	if _, err := os.Stat(mihomoPath()); err != nil {
-		return fmt.Errorf("未找到 mihomo.exe")
-	}
-	args := fmt.Sprintf("-d \"%s\" -f \"%s\"", baseDir(), configPath())
-	return shellExecute(mihomoPath(), args, baseDir(), "runas", 0)
-}
-
 func stopMihomo() error {
 	return runHidden("taskkill", "/f", "/im", "mihomo.exe")
-}
-
-func stopMihomoElevated() error {
-	return shellExecute("taskkill", "/f /im mihomo.exe", "", "runas", 0)
-}
-
-// ---------- 提权执行 ----------
-func shellExecute(file, params, dir, verb string, show int) error {
-	fp, _ := windows.UTF16PtrFromString(file)
-	pp, _ := windows.UTF16PtrFromString(params)
-	dp, _ := windows.UTF16PtrFromString(dir)
-	vp, _ := windows.UTF16PtrFromString(verb)
-	r, _, err := procShellExecute.Call(
-		0,
-		uintptr(unsafe.Pointer(vp)),
-		uintptr(unsafe.Pointer(fp)),
-		uintptr(unsafe.Pointer(pp)),
-		uintptr(unsafe.Pointer(dp)),
-		uintptr(show))
-	if r <= 32 {
-		return fmt.Errorf("ShellExecute 失败: %v", err)
-	}
-	return nil
 }
 
 // ---------- 系统代理注册表 ----------
@@ -266,6 +233,37 @@ func setTunEnabled(enable bool) error {
 	return os.WriteFile(p, []byte(strings.Join(lines, "\n")), 0644)
 }
 
+// ---------- 模式切换 ----------
+// 系统代理与 TUN 互斥，默认系统代理。
+func switchToSystemProxy() {
+	if tunEnabled() {
+		_ = setTunEnabled(false)
+	}
+	_ = stopMihomo()
+	if err := startMihomo(); err != nil {
+		notify("启动失败: " + err.Error())
+	} else {
+		waitForUp(6)
+	}
+	_ = setSystemProxy(true)
+	refresh()
+}
+
+func switchToTun() {
+	if err := setTunEnabled(true); err != nil {
+		notify("TUN 设置失败: " + err.Error())
+		return
+	}
+	_ = stopMihomo()
+	if err := startMihomo(); err != nil {
+		notify("启动失败: " + err.Error())
+	} else {
+		waitForUp(6)
+	}
+	_ = setSystemProxy(false)
+	refresh()
+}
+
 // ---------- 打开网页 ----------
 func startBrowser(url string) error {
 	return runHidden("cmd", "/c", "start", "", url)
@@ -276,8 +274,8 @@ var (
 	mStatus *systray.MenuItem
 	mStart  *systray.MenuItem
 	mStop   *systray.MenuItem
-	mProxy  *systray.MenuItem
-	mTun    *systray.MenuItem
+	mModeSys *systray.MenuItem
+	mModeTun *systray.MenuItem
 	mWeb    *systray.MenuItem
 	mQuit   *systray.MenuItem
 )
@@ -285,15 +283,15 @@ var (
 func refresh() {
 	if isRunning() {
 		mStatus.SetTitle("状态：运行中")
-		mStart.Enable()
-		mStop.Disable()
-	} else {
-		mStatus.SetTitle("状态：已停止")
 		mStart.Disable()
 		mStop.Enable()
+	} else {
+		mStatus.SetTitle("状态：已停止")
+		mStart.Enable()
+		mStop.Disable()
 	}
-	setChecked(mProxy, proxyOn())
-	setChecked(mTun, tunEnabled())
+	setChecked(mModeSys, !tunEnabled())
+	setChecked(mModeTun, tunEnabled())
 }
 
 func setChecked(item *systray.MenuItem, b bool) {
@@ -319,38 +317,43 @@ func onReady() {
 
 	mStart = systray.AddMenuItem("启动 mihomo", "")
 	mStop = systray.AddMenuItem("停止 mihomo", "")
-	mProxy = systray.AddMenuItemCheckbox("系统代理", "开启 / 关闭 Windows 系统代理", proxyOn())
-	mTun = systray.AddMenuItemCheckbox("TUN 模式", "以管理员方式接管流量", tunEnabled())
+	mModeSys = systray.AddMenuItemCheckbox("系统代理", "以系统代理接管", !tunEnabled())
+	mModeTun = systray.AddMenuItemCheckbox("TUN 模式", "以管理员方式接管", tunEnabled())
+	systray.AddSeparator()
 	mWeb = systray.AddMenuItem("打开 Web 面板", "")
 	mQuit = systray.AddMenuItem("退出", "")
 
 	refresh()
 
+	// 启动时自动开启系统代理（后台执行，避免阻塞托盘）
 	go func() {
-		for range mStart.ClickedCh {
+		if tunEnabled() {
+			_ = setTunEnabled(false)
+		}
+		if !isRunning() {
 			if err := startMihomo(); err != nil {
-				notify("启动失败：" + err.Error())
+				notify("启动失败: " + err.Error())
 			} else {
 				waitForUp(6)
-				notify("mihomo 已启动")
 			}
-			refresh()
 		}
+		_ = setSystemProxy(true)
+		refresh()
 	}()
+
 	go func() {
-		for range mStop.ClickedCh {
-			_ = stopMihomo()
-			notify("mihomo 已停止")
-			refresh()
-		}
-	}()
-	go func() {
-		for range mProxy.ClickedCh {
-			if proxyOn() {
-				_ = setSystemProxy(false)
+		for range mStart.ClickedCh {
+			if tunEnabled() {
+				if err := startMihomo(); err != nil {
+					notify("启动失败: " + err.Error())
+				} else {
+					waitForUp(6)
+				}
 			} else {
-				if !isRunning() {
-					_ = startMihomo()
+				if err := startMihomo(); err != nil {
+					notify("启动失败: " + err.Error())
+				} else {
+					waitForUp(6)
 				}
 				_ = setSystemProxy(true)
 			}
@@ -358,17 +361,31 @@ func onReady() {
 		}
 	}()
 	go func() {
-		for range mTun.ClickedCh {
-			if tunEnabled() {
-				_ = setTunEnabled(false)
-				_ = stopMihomoElevated()
-			} else {
-				if err := setTunEnabled(true); err != nil {
-					notify("TUN 设置失败：" + err.Error())
-				} else {
-					_ = stopMihomo()
-					_ = startMihomoElevated()
+		for range mStop.ClickedCh {
+			_ = stopMihomo()
+			_ = setSystemProxy(false)
+			notify("mihomo 已停止")
+			refresh()
+		}
+	}()
+	go func() {
+		for range mModeSys.ClickedCh {
+			if !tunEnabled() {
+				// 已是系统代理模式，仅确保生效
+				if !isRunning() {
+					_ = startMihomo()
 				}
+				_ = setSystemProxy(true)
+			} else {
+				switchToSystemProxy()
+			}
+			refresh()
+		}
+	}()
+	go func() {
+		for range mModeTun.ClickedCh {
+			if !tunEnabled() {
+				switchToTun()
 			}
 			refresh()
 		}
@@ -385,7 +402,14 @@ func onReady() {
 	}()
 }
 
-func onExit() {}
+// 关闭程序时自动关闭所有代理（系统代理 + 停止 mihomo + 恢复 tun.enable）
+func onExit() {
+	_ = setSystemProxy(false)
+	_ = stopMihomo()
+	if tunEnabled() {
+		_ = setTunEnabled(false)
+	}
+}
 
 func main() {
 	systray.Run(onReady, onExit)
