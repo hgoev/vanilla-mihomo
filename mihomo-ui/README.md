@@ -42,7 +42,10 @@ go build -ldflags "-H=windowsgui" -o mihomo-ui.exe .
 
 | 文件 | 说明 |
 |------|------|
-| `main.go` | 主程序（托盘、进程控制、模式切换、代理/TUN 控制） |
+| `main.go` | 程序入口 + 托盘菜单 + 事件处理 |
+| `config.go` | 配置读取/缓存、路径、apiBase、`tun.enable` 编辑 |
+| `mihomo.go` | 进程启动/停止、状态检测、重启、模式切换 |
+| `proxy.go` | 系统代理注册表 + WinInet 刷新 |
 | `icon.ico` | 托盘图标（已通过 go:embed 内嵌） |
 | `mihomo-ui.exe.manifest` | 管理员清单（`requireAdministrator`） |
 | `rsrc_windows_amd64.syso` | 由 rsrc 生成的资源文件 |
