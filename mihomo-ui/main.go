@@ -121,6 +121,17 @@ func waitForUp(seconds int) bool {
 	return false
 }
 
+// 等待 mihomo 完全退出（API 不再响应，端口释放），避免启动新实例时端口被占。
+func waitForDown(seconds int) {
+	for i := 0; i < seconds*3; i++ {
+		if !isRunning() {
+			time.Sleep(300 * time.Millisecond)
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
 // ---------- 进程启动 / 停止（程序已提权，子进程继承管理员令牌） ----------
 func runHidden(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
@@ -235,15 +246,27 @@ func setTunEnabled(enable bool) error {
 
 // ---------- 模式切换 ----------
 // 系统代理与 TUN 互斥，默认系统代理。
+// 重启：先确保旧进程退出并释放端口，再启动新进程，避免端口占用导致启动失败。
+func restartMihomo() error {
+	if isRunning() {
+		_ = stopMihomo()
+		waitForDown(8)
+	}
+	if err := startMihomo(); err != nil {
+		return err
+	}
+	if !waitForUp(8) {
+		return fmt.Errorf("mihomo 未在预期时间内启动（可能端口被占用）")
+	}
+	return nil
+}
+
 func switchToSystemProxy() {
 	if tunEnabled() {
 		_ = setTunEnabled(false)
 	}
-	_ = stopMihomo()
-	if err := startMihomo(); err != nil {
-		notify("启动失败: " + err.Error())
-	} else {
-		waitForUp(6)
+	if err := restartMihomo(); err != nil {
+		notify("切换失败: " + err.Error())
 	}
 	_ = setSystemProxy(true)
 	refresh()
@@ -254,11 +277,8 @@ func switchToTun() {
 		notify("TUN 设置失败: " + err.Error())
 		return
 	}
-	_ = stopMihomo()
-	if err := startMihomo(); err != nil {
-		notify("启动失败: " + err.Error())
-	} else {
-		waitForUp(6)
+	if err := restartMihomo(); err != nil {
+		notify("切换失败: " + err.Error())
 	}
 	_ = setSystemProxy(false)
 	refresh()
@@ -330,12 +350,8 @@ func onReady() {
 		if tunEnabled() {
 			_ = setTunEnabled(false)
 		}
-		if !isRunning() {
-			if err := startMihomo(); err != nil {
-				notify("启动失败: " + err.Error())
-			} else {
-				waitForUp(6)
-			}
+		if err := restartMihomo(); err != nil {
+			notify("启动失败: " + err.Error())
 		}
 		_ = setSystemProxy(true)
 		refresh()
@@ -343,18 +359,10 @@ func onReady() {
 
 	go func() {
 		for range mStart.ClickedCh {
-			if tunEnabled() {
-				if err := startMihomo(); err != nil {
-					notify("启动失败: " + err.Error())
-				} else {
-					waitForUp(6)
-				}
-			} else {
-				if err := startMihomo(); err != nil {
-					notify("启动失败: " + err.Error())
-				} else {
-					waitForUp(6)
-				}
+			if err := restartMihomo(); err != nil {
+				notify("启动失败: " + err.Error())
+			}
+			if !tunEnabled() {
 				_ = setSystemProxy(true)
 			}
 			refresh()
